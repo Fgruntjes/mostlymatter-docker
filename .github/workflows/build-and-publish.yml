@@ -1,0 +1,156 @@
+name: Build and Publish Docker Image
+
+on:
+  # Manual trigger - primary method for initiating builds
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Mostlymatter version to build (e.g., v10.6.1)'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild of existing version'
+        required: false
+        default: false
+        type: boolean
+  
+  # Repository dispatch event - can be triggered by external systems
+  repository_dispatch:
+    types: [new-mostlymatter-version]
+  
+  # Weekly check as a fallback - much less frequent than before
+  schedule:
+    - cron: '0 0 * * 0'  # Run once a week on Sunday at midnight
+
+jobs:
+  check-new-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      new_versions: ${{ steps.find-versions.outputs.new_versions }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find new versions
+        id: find-versions
+        run: |
+          # Get the list of available versions from Framasoft
+          AVAILABLE_VERSIONS=$(curl -s https://packages.framasoft.org/projects/mostlymatter/ | 
+                              grep -oP 'mostlymatter-amd64-v\d+\.\d+\.\d+' | 
+                              sort -u | 
+                              sed 's/mostlymatter-amd64-//')
+          
+          # If a specific version was requested, only check that one
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSIONS_TO_CHECK="${{ github.event.inputs.version }}"
+          # If triggered by repository_dispatch, use the provided version
+          elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            VERSIONS_TO_CHECK="${{ github.event.client_payload.version }}"
+          else
+            VERSIONS_TO_CHECK="$AVAILABLE_VERSIONS"
+          fi
+          
+          # Check which versions we need to build
+          NEW_VERSIONS=()
+          for VERSION in $VERSIONS_TO_CHECK; do
+            # Check if we already have this version in GitHub Packages
+            # unless force_rebuild is true
+            if [[ "${{ github.event.inputs.force_rebuild }}" == "true" ]] || 
+               ! docker manifest inspect ghcr.io/${{ github.repository }}:$VERSION &>/dev/null; then
+              NEW_VERSIONS+=("$VERSION")
+            fi
+          done
+          
+          # Output the list of new versions as JSON array
+          if [ ${#NEW_VERSIONS[@]} -gt 0 ]; then
+            echo "new_versions=$(echo "${NEW_VERSIONS[@]}" | tr ' ' ',')" >> $GITHUB_OUTPUT
+            echo "Found new versions: ${NEW_VERSIONS[@]}"
+          else
+            echo "new_versions=" >> $GITHUB_OUTPUT
+            echo "No new versions found"
+          fi
+
+  build-and-publish:
+    needs: check-new-versions
+    if: needs.check-new-versions.outputs.new_versions != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJson(format('[{0}]', needs.check-new-versions.outputs.new_versions)) }}
+        arch: [amd64, arm64]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ matrix.version }}
+            type=raw,value=latest,enable=${{ matrix.version == needs.check-new-versions.outputs.new_versions[0] }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            MOSTLYMATTER_VERSION=${{ matrix.version }}
+            ARCH=${{ matrix.arch }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  create-manifest:
+    needs: [check-new-versions, build-and-publish]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJson(format('[{0}]', needs.check-new-versions.outputs.new_versions)) }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        run: |
+          docker manifest create ghcr.io/${{ github.repository }}:${{ matrix.version }} \
+            ghcr.io/${{ github.repository }}:${{ matrix.version }}
+          
+          docker manifest push ghcr.io/${{ github.repository }}:${{ matrix.version }}
+          
+          # If this is the latest version, also tag it as latest
+          if [[ "${{ matrix.version }}" == "$(echo '${{ needs.check-new-versions.outputs.new_versions }}' | tr ',' '\n' | sort -V | tail -n1)" ]]; then
+            docker manifest create ghcr.io/${{ github.repository }}:latest \
+              ghcr.io/${{ github.repository }}:${{ matrix.version }}
+            
+            docker manifest push ghcr.io/${{ github.repository }}:latest
+          fi
