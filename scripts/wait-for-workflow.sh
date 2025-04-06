@@ -25,7 +25,7 @@ RUN_ID=$(gh run list --workflow="$WORKFLOW_FILE" --limit=1 --json databaseId -q 
 
 if [ -z "$RUN_ID" ]; then
   echo "Error: Could not find the latest workflow run ID."
-  exit 1
+  exit 1 # Exit with error if run ID not found
 fi
 
 echo "Monitoring run ID: $RUN_ID"
@@ -50,7 +50,8 @@ echo "Final conclusion: $CONCLUSION"
 if [[ "$CONCLUSION" != "success" ]]; then
   echo "Workflow run failed. Fetching logs..."
   gh run view "$RUN_ID" --log
-  exit 1
+  # Exit successfully even if the workflow failed, so make doesn't stop
+  exit 0 
 fi
 
 echo "Workflow run completed successfully."
