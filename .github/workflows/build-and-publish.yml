@@ -25,6 +25,9 @@ on:
 jobs:
   check-new-versions:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       new_versions: ${{ steps.find-versions.outputs.new_versions }}
     steps:
