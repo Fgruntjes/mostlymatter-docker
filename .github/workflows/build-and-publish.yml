@@ -34,6 +34,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Docker CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          docker --version
+
       - name: Find new versions
         id: find-versions
         run: |
