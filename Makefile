@@ -26,6 +26,7 @@ check-workflow:
 
 wait-workflow: scripts/wait-for-workflow.sh
 	@echo "Waiting for the latest workflow run to complete..."
+	@chmod +x scripts/wait-for-workflow.sh # Ensure script is executable
 	@RUN_ID=$$(gh run list --workflow=$(WORKFLOW_FILE) --limit=1 --json databaseId -q .[0].databaseId); \
 	if [ -z "$$RUN_ID" ]; then \
 		echo "No workflow runs found."; \
